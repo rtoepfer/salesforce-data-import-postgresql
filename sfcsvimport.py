@@ -463,11 +463,10 @@ if __name__ == "__main__":
         myCursor.execute(sql)
 
         # hack for tinyint on PostgreSQL
-        if args["database"].lower() == "pgsql":
-            try:
-                myCursor.execute('CREATE DOMAIN "tinyint" AS smallint;')
-            except:
-                myDb.rollback()
+        try:
+            myCursor.execute('CREATE DOMAIN "tinyint" AS smallint;')
+        except:
+            myDb.rollback()
 
         if args["file"]==None:
             resolveDirectory(args["directory"])
