@@ -4,15 +4,12 @@ import logging
 import os
 import sys
 import csv
-import MySQLdb
 import psycopg2
 import io
 import re
 import base62
 import unicodedata
 import traceback
-from simple_salesforce import Salesforce
-import simple_salesforce
 
 
 class AWS_Salesforce_to_PostgreSQL:
@@ -51,20 +48,20 @@ class AWS_Salesforce_to_PostgreSQL:
         return output
 
     def escapeString(self, value):
-        if args["database"].lower() == "mysql":
-            return MySQLdb.escape_string(value)
-        elif args["database"].lower() == "pgsql" and value != None and value != "":
-            strValue = MySQLdb.escape_string(value).decode("utf-8")
-            strValue = strValue.replace("\'", "''")
-            return strValue.encode("utf-8")
-        return value
+        if value == "" or value == None:
+            return ""
+        try:
+            value = value.decode()
+        except (UnicodeDecodeError, AttributeError):
+            pass
+        strValue = str(value)        
+        strValue = strValue.replace("\'", "''")
+        return strValue
 
     def quoteTableOrColumn(self, value):
-        if args["database"].lower() == "mysql":
-            return (str("`") + str(value) + str("`"))
-        value = (str('"') + str(value) + str('"'))
         if value == "" or value == None:
             raise Exception("Logic error")
+        value = (str('"') + str(value) + str('"'))
         return value
 
     def insertData(self, tableName,fileContent,fields):
@@ -334,24 +331,6 @@ class AWS_Salesforce_to_PostgreSQL:
         logger.debug('total rows in file : %s', dataCount)
         if int(inserted) != dataCount:
             logger.error('inserted not equal to total rows')
-
-    # get table's schema
-    def get_schema(self, table_name):
-        
-        schema = None
-        try:
-            if table_name in self._table_salesforce_schema:
-                schema = self._table_salesforce_schema[table_name]
-            else:
-                schema = getattr(self._salesforce, table_name).describe()
-                self._table_salesforce_schema[table_name] = schema
-        except simple_salesforce.exceptions.SalesforceResourceNotFound as ex:
-            logger.warning("Could not get schema for table %s" % table_name)
-        except Exception as ex:
-            logger.warning("Unknown exception getting schema for table %s" % table_name)
-            logger.warning(ex)
-            
-        return schema
         
     def resolveFile(self, filePath):
         logger.debug('Checking file: %s', filePath)
@@ -379,94 +358,32 @@ class AWS_Salesforce_to_PostgreSQL:
 
             fields = {}
 
-            # get field type from Salesforce if connection available
-            manual_determine_schema = True
+            for fieldName in csvData.fieldnames:
+                fieldType = self.getFieldTypeByName(fieldName)
 
-            if args["sf_user"]:
-                manual_determine_schema = False
-
-                # name of table in salesforce equals name of CSV file
-                table_name = os.path.basename(filePath)
-                table_name = table_name[:-4]
-                schema = self.get_schema(table_name)
-                if schema == None:
-                    manual_determine_schema = True
+                if not fieldName in fields:
+                    fields[fieldName] = {
+                        "type":None,
+                        "types":[],
+                        "size":0
+                    }
+                if fieldType != None:
+                    fields[fieldName]["types"].append(fieldType)
                 
-                if manual_determine_schema == False:
-
-                    for fieldName in csvData.fieldnames:
-
-                        fieldType = None
-                        fieldSize = None
-
-                        for schema_field in schema['fields']:
-                            if fieldName == schema_field['name']:
-
-                                # get field type
-                                if schema_field['type'] == 'reference' or schema_field['type'] == 'id':
-                                    fieldType = 'id'
-                                elif schema_field['type'] == 'int':
-                                    fieldType = 'int'
-                                elif schema_field['type'] == 'double' or schema_field['type'] == 'currency':
-                                    fieldType = 'float'
-                                elif schema_field['type'] == 'boolean':
-                                    fieldType = 'bool'
-                                elif schema_field['type'] == 'string':
-                                    fieldType = 'string'
-                                elif schema_field['type'] == 'date':
-                                    fieldType = 'datetime'
-                                elif schema_field['type'] == 'datetime':
-                                    fieldType = 'datetime'
-                                else:
-                                    logger.warning("Unknown type: %s" % (schema_field['type']))
-                                    fieldType = 'string'
-
-                                fieldSize = schema_field['byteLength']
-
-                                break
-
-                        if not fieldName in fields:
-                            fields[fieldName] = {
-                                "type": None,
-                                "types": [],
-                                "size": 0
-                            }
-
-                        if fieldType != None:
-                            fields[fieldName]["types"].append(fieldType)
-                            
-                        if fieldSize != None:
-                            fields[fieldName]["size"] = fieldSize
-
-            # determine field type by analyzing all values in CSV file
-            if manual_determine_schema:
-
+            logger.debug('      Start analyzing values')
+            for row in csvData:
                 for fieldName in csvData.fieldnames:
-                    fieldType = self.getFieldTypeByName(fieldName)
+                    if row[fieldName] != "":
+                        fieldType = self.getFieldTypeByValue(row[fieldName])
+                        if not fieldType in fields[fieldName]["types"]:
+                            if fieldType !=None:
+                                fields[fieldName]["types"].append(fieldType)
+                    fields[fieldName]["size"] = max(fields[fieldName]["size"], len(str(row[fieldName])))
 
-                    if not fieldName in fields:
-                        fields[fieldName] = {
-                            "type":None,
-                            "types":[],
-                            "size":0
-                        }
-                    if fieldType != None:
-                        fields[fieldName]["types"].append(fieldType)
-                    
-                logger.debug('      Start analyzing values')
-                for row in csvData:
-                    for fieldName in csvData.fieldnames:
-                        if row[fieldName] != "":
-                            fieldType = self.getFieldTypeByValue(row[fieldName])
-                            if not fieldType in fields[fieldName]["types"]:
-                                if fieldType !=None:
-                                    fields[fieldName]["types"].append(fieldType)
-                        fields[fieldName]["size"] = max(fields[fieldName]["size"], len(str(row[fieldName])))
-
-                    # only analyze first 2500 rows
-                    # note: this isn't adequate for AWS Insurance TechCanary, causes "column can't be None error"
-                    # if totalRows > 2500:
-                    #    break
+                # only analyze first 2500 rows
+                # note: this isn't adequate for some exports, causes "column can't be None error"
+                # if totalRows > 2500:
+                #    break
                 
             # determine type by values in types string
             for fieldName in csvData.fieldnames:
@@ -509,16 +426,6 @@ class AWS_Salesforce_to_PostgreSQL:
             logger.info('Please check directory path for %s', dirPath)
             logger.error('Directory not found: %s', dirPath)
 
-        if args["sf_user"]:
-
-            logger.debug(' getting schema for all csv files')
-
-            for fileName in sorted(os.listdir(dirPath)):
-                filePath = os.path.join(dirPath,fileName)
-                table_name = os.path.basename(filePath)
-                table_name = table_name[:-4]
-                self.get_schema(table_name)
-
         logger.debug(' reading directory(%s) to find csv files', dirPath)
         for fileName in sorted(os.listdir(dirPath)):
             filePath = os.path.join(dirPath,fileName)
@@ -537,18 +444,10 @@ class AWS_Salesforce_to_PostgreSQL:
         
         return True
 
-    # connect to Salesforce
-    def connect(self, user, password, token, sandbox):
-
-        if sandbox and sandbox == "Y":
-            self._salesforce = Salesforce(username=user, password=password, security_token=token, domain="test")
-        else:
-            self._salesforce = Salesforce(username=user, password=password, security_token=token)
-
 if (__name__ == "__main__"):
 
     args = None
-    logger = logging.getLogger("AWS sf_csv_export_to_database.py")
+    logger = logging.getLogger("sf_csv_export_to_database.py")
     database = None
     
     parser = argparse.ArgumentParser()
@@ -558,21 +457,6 @@ if (__name__ == "__main__"):
     parser.add_argument('--test-data', help='test data size per file',type=int)
     parser.add_argument('--log-file', help='path of log file')
     parser.add_argument('--blacklist-file', help='path of blacklist file')
-
-    parser.add_argument('--database', help='database (MySQL or PostgreSQL, PostgreSQL recommended due to max row column size limitation in MySQL)', default="MySQL")
-
-    parser.add_argument('--sql-host', help='sql server address', default="127.0.0.1")
-    parser.add_argument('--sql-port', help='sql server port',type=int, default=5432)  
-    parser.add_argument('--sql-user', help='sql username', default="root")
-    parser.add_argument('--sql-password', help='sql pasword')
-    parser.add_argument('--sql-database', help='sql database', default="aws_salesforce")
-
-    parser.add_argument('--reset-id-pool', help='debug',action='store_true',default=False)
-    
-    parser.add_argument('--sf-user', help='Salesforce user name')
-    parser.add_argument('--sf-password', help='Salesforce password')
-    parser.add_argument('--sf-security-token', help='Security token')
-    parser.add_argument('--sf-sandbox', help='Sandbox (Y/N)', default=False)
 
     args = vars(parser.parse_args())
 
@@ -595,51 +479,21 @@ if (__name__ == "__main__"):
         else:
             logging.basicConfig(level=logLevel)
 
-        # database MySQL or PostgreSQL
-        if args["database"].lower() == "mysql":
-            database = MySQLdb.connect(host=args["sql_host"],port=args["sql_port"],user=args["sql_user"],passwd=args["sql_password"],db=args["sql_database"])
-            database.set_character_set('utf8')
-            cursor = database.cursor()
-            cursor.execute('SET NAMES utf8;')
-            cursor.execute('SET CHARACTER SET utf8;')
-            cursor.execute('SET character_set_connection=utf8;')
-        else:
-            database = psycopg2.connect(
-                host=args["sql_host"],
-                port=args["sql_port"],
-                user=args["sql_user"],
-                password=args["sql_password"],
-                database=args["sql_database"]
-            )
-            database.autocommit = True
-            cursor = database.cursor()
-
-        # create the Salesforce class
-        salesforce = AWS_Salesforce_to_PostgreSQL()
-        salesforce._database = database
-
-        # connect to Salesforce (NOT supported for Essential or Professional Editions)
-        if args["sf_user"]:
-            salesforce.connect(args["sf_user"], args["sf_password"], args["sf_security_token"], args["sf_sandbox"])
-
-        # reset id pool
-        if args["reset_id_pool"]:
-            sql = "DROP TABLE IF EXISTS id_pool;"
-            cursor.execute(sql)
-
-        # create id pool table, used for new records inserted 
-        if args["database"].lower() == "mysql":
-            sql = "CREATE TABLE IF NOT EXISTS id_pool ( id BIGSERIAL, sfId varchar(255) NOT NULL, PRIMARY KEY (id), UNIQUE KEY sfIdIndex (id,sfId)) DEFAULT CHARSET=utf8;"
-        else:
-            sql = "CREATE TABLE IF NOT EXISTS id_pool ( id BIGSERIAL, sfId varchar(255) NOT NULL, PRIMARY KEY (id), UNIQUE (id,sfId));"
-        cursor.execute(sql)
+        database = psycopg2.connect(
+            host=args["sql_host"],
+            port=args["sql_port"],
+            user=args["sql_user"],
+            password=args["sql_password"],
+            database=args["sql_database"]
+        )
+        database.autocommit = True
+        cursor = database.cursor()
 
         # hack for tinyint on PostgreSQL
-        if args["database"].lower() == "pgsql":
-            try:
-                cursor.execute('CREATE DOMAIN "tinyint" AS smallint;')
-            except:
-                database.rollback()
+        try:
+            cursor.execute('CREATE DOMAIN "tinyint" AS smallint;')
+        except:
+            database.rollback()
 
         if args["file"]==None:
             salesforce.resolveDirectory(args["directory"])
