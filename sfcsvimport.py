@@ -12,16 +12,10 @@ import unicodedata
 import traceback
 
 
-class AWS_Salesforce_to_PostgreSQL:
-
-    # Salesforce connection
-    _salesforce = None
+class Salesforce_to_PostgreSQL:
 
     # database
     _database = None
-
-    # a dictionary of table names to table schema, set once
-    _table_salesforce_schema = {}
 
     def makeItPrintable(self, content):
         if str(content).isprintable():
@@ -494,6 +488,8 @@ if (__name__ == "__main__"):
             cursor.execute('CREATE DOMAIN "tinyint" AS smallint;')
         except:
             database.rollback()
+
+        salesforce = Salesforce_to_PostgreSQL()
 
         if args["file"]==None:
             salesforce.resolveDirectory(args["directory"])
