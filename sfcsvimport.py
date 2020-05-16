@@ -490,6 +490,7 @@ if (__name__ == "__main__"):
             database.rollback()
 
         salesforce = Salesforce_to_PostgreSQL()
+        salesforce._database = database
 
         if args["file"]==None:
             salesforce.resolveDirectory(args["directory"])
